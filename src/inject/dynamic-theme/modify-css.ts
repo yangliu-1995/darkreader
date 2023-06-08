@@ -1,13 +1,10 @@
 import {parseColorWithCache, rgbToHSL, hslToString} from '../../utils/color';
 import {clamp} from '../../utils/math';
 import {getMatches} from '../../utils/text';
-import {getAbsoluteURL} from '../../utils/url';
 import {modifyBackgroundColor, modifyBorderColor, modifyForegroundColor, modifyGradientColor, modifyShadowColor, clearColorModificationCache} from '../../generators/modify-colors';
-import {cssURLRegex, getCSSURLValue, getCSSBaseBath} from './css-rules';
-import type {ImageDetails} from './image';
-import {getImageDetails, getFilteredImageDataURL, cleanImageProcessingCache} from './image';
+import {cssURLRegex} from './css-rules';
 import type {CSSVariableModifier, VariablesStore} from './variables';
-import {logWarn, logInfo} from '../utils/log';
+import {logWarn} from '../utils/log';
 import type {FilterConfig, Theme} from '../../definitions';
 import {isFirefox, isCSSColorSchemePropSupported} from '../../utils/platform';
 import type {parsedGradient} from '../../utils/parsing';
@@ -92,7 +89,7 @@ function joinSelectors(...selectors: string[]) {
     return selectors.filter(Boolean).join(', ');
 }
 
-export function getModifiedUserAgentStyle(theme: Theme, isIFrame: boolean, styleSystemControls: boolean): string {
+export function getModifiedUserAgentStyle(theme: Theme, isIFrame: boolean, styleSystemControls: boolean) {
     const lines: string[] = [];
     if (!isIFrame) {
         lines.push('html {');
@@ -138,7 +135,7 @@ export function getModifiedUserAgentStyle(theme: Theme, isIFrame: boolean, style
     return lines.join('\n');
 }
 
-export function getSelectionColor(theme: Theme): {backgroundColorSelection: string; foregroundColorSelection: string} {
+export function getSelectionColor(theme: Theme) {
     let backgroundColorSelection: string;
     let foregroundColorSelection: string;
     if (theme.selectionColor === 'auto') {
@@ -223,7 +220,7 @@ function getModifiedScrollbarStyle(theme: Theme) {
     return lines.join('\n');
 }
 
-export function getModifiedFallbackStyle(filter: FilterConfig, {strict}: {strict: boolean}): string {
+export function getModifiedFallbackStyle(filter: FilterConfig, {strict}: {strict: boolean}) {
     const lines: string[] = [];
     // https://github.com/darkreader/darkreader/issues/3618#issuecomment-895477598
     const isMicrosoft = ['microsoft.com', 'docs.microsoft.com'].includes(location.hostname);
@@ -269,26 +266,6 @@ function getColorModifier(prop: string, value: string, rule: CSSStyleRule): stri
         return (filter) => modifyBorderColor(rgb, filter);
     }
     return (filter) => modifyForegroundColor(rgb, filter);
-}
-
-const imageDetailsCache = new Map<string, ImageDetails>();
-const awaitingForImageLoading = new Map<string, Array<(imageDetails: ImageDetails | null) => void>>();
-
-function shouldIgnoreImage(selectorText: string, selectors: string[]) {
-    if (!selectorText || selectors.length === 0) {
-        return false;
-    }
-    if (selectors.some((s) => s === '*')) {
-        return true;
-    }
-    const ruleSelectors = selectorText.split(/,\s*/g);
-    for (let i = 0; i < selectors.length; i++) {
-        const ignoredSelector = selectors[i];
-        if (ruleSelectors.some((s) => s === ignoredSelector)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 interface bgImageMatches {
@@ -365,88 +342,8 @@ export function getBgImageModifier(
         };
 
         const getURLModifier = (urlValue: string) => {
-            if (shouldIgnoreImage(rule.selectorText, ignoreImageSelectors)) {
-                return null;
-            }
-            let url = getCSSURLValue(urlValue);
-            const isURLEmpty = url.length === 0;
-            const {parentStyleSheet} = rule;
-            const baseURL = (parentStyleSheet && parentStyleSheet.href) ?
-                getCSSBaseBath(parentStyleSheet.href) :
-                parentStyleSheet!.ownerNode?.baseURI || location.origin;
-            url = getAbsoluteURL(baseURL, url);
-
-            const absoluteValue = `url("${url}")`;
-
-            return async (filter: FilterConfig): Promise<string | null> => {
-                if (isURLEmpty) {
-                    return "url('')";
-                }
-                let imageDetails: ImageDetails | null;
-                if (imageDetailsCache.has(url)) {
-                    imageDetails = imageDetailsCache.get(url)!;
-                } else {
-                    try {
-                        if (awaitingForImageLoading.has(url)) {
-                            const awaiters = awaitingForImageLoading.get(url)!;
-                            imageDetails = await new Promise<ImageDetails | null>((resolve) => awaiters.push(resolve));
-                            if (!imageDetails) {
-                                return null;
-                            }
-                        } else {
-                            awaitingForImageLoading.set(url, []);
-                            imageDetails = await getImageDetails(url);
-                            imageDetailsCache.set(url, imageDetails);
-                            awaitingForImageLoading.get(url)!.forEach((resolve) => resolve(imageDetails));
-                            awaitingForImageLoading.delete(url);
-                        }
-                        if (isCancelled()) {
-                            return null;
-                        }
-                    } catch (err) {
-                        logWarn(err);
-                        if (awaitingForImageLoading.has(url)) {
-                            awaitingForImageLoading.get(url)!.forEach((resolve) => resolve(null));
-                            awaitingForImageLoading.delete(url);
-                        }
-                        return absoluteValue;
-                    }
-                }
-                const bgImageValue = getBgImageValue(imageDetails, filter) || absoluteValue;
-                return bgImageValue;
-            };
+            return null;
         };
-
-        const getBgImageValue = (imageDetails: ImageDetails, filter: FilterConfig) => {
-            const {isDark, isLight, isTransparent, isLarge, isTooLarge, width} = imageDetails;
-            let result: string | null;
-            if (isTooLarge) {
-                logInfo(`Not modifying too large image ${imageDetails.src}`);
-                result = `url("${imageDetails.src}")`;
-            } else if (isDark && isTransparent && filter.mode === 1 && !isLarge && width > 2) {
-                logInfo(`Inverting dark image ${imageDetails.src}`);
-                const inverted = getFilteredImageDataURL(imageDetails, {...filter, sepia: clamp(filter.sepia + 10, 0, 100)});
-                result = `url("${inverted}")`;
-            } else if (isLight && !isTransparent && filter.mode === 1) {
-                if (isLarge) {
-                    logInfo(`Not modifying light non-transparent large image ${imageDetails.src}`);
-                    result = 'none';
-                } else {
-                    logInfo(`Dimming light image ${imageDetails.src}`);
-                    const dimmed = getFilteredImageDataURL(imageDetails, filter);
-                    result = `url("${dimmed}")`;
-                }
-            } else if (filter.mode === 0 && isLight && !isLarge) {
-                logInfo(`Applying filter to image ${imageDetails.src}`);
-                const filtered = getFilteredImageDataURL(imageDetails, {...filter, brightness: clamp(filter.brightness - 10, 5, 200), sepia: clamp(filter.sepia + 10, 0, 100)});
-                result = `url("${filtered}")`;
-            } else {
-                logInfo(`Not modifying too large image ${imageDetails.src}`);
-                result = null;
-            }
-            return result;
-        };
-
         const modifiers: Array<CSSValueModifier | null> = [];
 
         let matchIndex = 0;
@@ -484,7 +381,9 @@ export function getBgImageModifier(
             }
         });
 
+        /* eslint-disable-next-line @typescript-eslint/promise-function-async */
         return (filter: FilterConfig) => {
+            /* eslint-disable-next-line @typescript-eslint/promise-function-async */
             const results = modifiers.filter(Boolean).map((modify) => modify!(filter));
             if (results.some((r) => r instanceof Promise)) {
                 return Promise.all(results).then((asyncResults) => {
@@ -569,9 +468,6 @@ function getVariableDependantModifier(
     return variablesStore.getModifierForVarDependant(prop, value);
 }
 
-export function cleanModificationCache(): void {
+export function cleanModificationCache() {
     clearColorModificationCache();
-    imageDetailsCache.clear();
-    cleanImageProcessingCache();
-    awaitingForImageLoading.clear();
 }
